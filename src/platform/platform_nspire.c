@@ -84,7 +84,9 @@ int plat_init(int argc, char **argv)
         saved_classic_divider = *classic_timer_divider;
         saved_classic_control = *classic_timer_control;
         *classic_timer_control = 0x10; /* freeze while configuring */
-        *classic_timer_divider = 0;    /* count every 32,768 Hz tick */
+        /* 32,768 / (31 + 1) = 1,024 Hz. This extends the 16-bit
+         * wrap interval from 2 s to 64 s while retaining ~0.98 ms ticks. */
+        *classic_timer_divider = 31;
         *classic_timer_count = 0;
         *classic_timer_control = 0x0F; /* count up, free-running */
         classic_last_count = *classic_timer_count;
@@ -163,8 +165,8 @@ uint32_t plat_ms(void)
         uint16_t now = *classic_timer_count;
         classic_ticks += (uint16_t)(now - classic_last_count);
         classic_last_count = now;
-        /* Classic timer ticks at 32,768 Hz; preserve fractional ms. */
-        return (uint32_t)((classic_ticks * 1000ull) >> 15);
+        /* Prescaled classic timer ticks at 1,024 Hz. */
+        return (uint32_t)((classic_ticks * 1000ull) >> 10);
     }
     uint32_t t = 0xFFFFFFFFu - *cx_timer_value;
     /* CX SP804 timer: 32768 Hz -> ms with 64-bit math to avoid drift. */
