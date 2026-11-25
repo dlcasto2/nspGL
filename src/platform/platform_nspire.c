@@ -177,7 +177,17 @@ int64_t nspire_time_ms(void)
     if (!t0_ms) { t0_ms = (int64_t)(*(volatile uint32_t *)0x90090000) * 1000; t0_ticks = plat_ms(); if (!t0_ms) t0_ms = 1; }
     return t0_ms + (uint32_t)(plat_ms() - t0_ticks);
 }
-void plat_wait_ms(int ms) { if (ms > 0) msleep(ms); }
+void plat_wait_ms(int ms)
+{
+    if (ms > 0) {
+        /* The classic timer wraps every ~2 seconds. The app sleeps in short
+         * UI intervals; sample on both sides so modal menus also account for
+         * every wrap instead of losing elapsed time while waiting. */
+        if (classic_timer) (void)plat_ms();
+        msleep(ms);
+        if (classic_timer) (void)plat_ms();
+    }
+}
 
 void plat_keys(uint8_t *d)
 {
