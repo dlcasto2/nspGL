@@ -14,12 +14,23 @@ static char arg_file[256];
 static touchpad_report_t tp_last;
 static int tp_had;
 
-/* SP804 timer (second counter of the first timer module), 32768 Hz */
-static volatile uint32_t *const timer_load = (volatile uint32_t *)0x900C0020;
-static volatile uint32_t *const timer_value = (volatile uint32_t *)0x900C0024;
-static volatile uint32_t *const timer_control = (volatile uint32_t *)0x900C0028;
-static uint32_t saved_load, saved_control;
+/* The color CX uses an ARM SP804 timer. Classic Clickpad/Touchpad
+ * hardware uses the older 16-bit timer block at 0x900C0000 instead. */
+static volatile uint32_t *cx_timer_load;
+static volatile uint32_t *cx_timer_value;
+static volatile uint32_t *cx_timer_control;
+static volatile uint16_t *classic_timer_count;
+static volatile uint16_t *classic_timer_divider;
+static volatile uint16_t *classic_timer_control;
+static uint32_t saved_cx_load, saved_cx_control;
+static uint16_t saved_classic_count, saved_classic_divider, saved_classic_control;
 static uint32_t last_ticks;
+static uint16_t classic_last_count;
+static uint64_t classic_ticks;
+static int classic_timer, timer_ready;
+
+static scr_type_t display_type;
+static uint8_t *gray_fb;
 static unsigned old_speed;
 
 /* malloc_usable_size is referenced by QuickJS default allocator */
@@ -35,15 +46,61 @@ int plat_init(int argc, char **argv)
     if (argc > 1 && argv[1]) snprintf(arg_file, sizeof arg_file, "%s", argv[1]);
     cfg_register_fileext("html", "nspgl");
     cfg_register_fileext("htm", "nspgl");
-    fb = calloc(SCR_W * SCR_H, 2);
+    fb = calloc(SCR_W * SCR_H, sizeof(*fb));
     if (!fb) return -1;
+
+    /* lcd_type() reports SCR_320x240_4 on the OG monochrome Clickpad
+     * and SCR_320x240_565 on the color CX. Keep the renderer's internal
+     * framebuffer RGB565 and convert only when presenting to a classic LCD. */
+    display_type = lcd_type();
+    if (display_type != SCR_320x240_4 && display_type != SCR_320x240_565)
+        display_type = is_classic ? SCR_320x240_4 : SCR_320x240_565;
+    if (display_type == SCR_320x240_4) {
+        gray_fb = calloc(SCR_W * SCR_H / 2, sizeof(*gray_fb));
+        if (!gray_fb) {
+            free(fb);
+            fb = NULL;
+            return -1;
+        }
+    }
+
     old_speed = set_cpu_speed(CPU_SPEED_150MHZ);
-    if (!lcd_init(SCR_320x240_565)) return -1;
-    saved_load = *timer_load;
-    saved_control = *timer_control;
-    *timer_control = 0;
-    *timer_load = 0xFFFFFFFF;
-    *timer_control = 0x82;
+    if (!lcd_init(display_type)) {
+        if (old_speed) set_cpu_speed(old_speed);
+        free(gray_fb);
+        gray_fb = NULL;
+        free(fb);
+        fb = NULL;
+        return -1;
+    }
+
+    if (is_classic) {
+        /* The classic timer registers are 16-bit. Use the second channel of
+         * the first timer block so msleep() can keep using the 900D timer. */
+        classic_timer = 1;
+        classic_timer_count = (volatile uint16_t *)0x900C000C;
+        classic_timer_divider = (volatile uint16_t *)0x900C0010;
+        classic_timer_control = (volatile uint16_t *)0x900C0014;
+        saved_classic_count = *classic_timer_count;
+        saved_classic_divider = *classic_timer_divider;
+        saved_classic_control = *classic_timer_control;
+        *classic_timer_control = 0x10; /* freeze while configuring */
+        *classic_timer_divider = 0;    /* count every 32,768 Hz tick */
+        *classic_timer_count = 0;
+        *classic_timer_control = 0x0F; /* count up, free-running */
+        classic_last_count = *classic_timer_count;
+        classic_ticks = 0;
+    } else {
+        cx_timer_load = (volatile uint32_t *)0x900C0020;
+        cx_timer_value = (volatile uint32_t *)0x900C0024;
+        cx_timer_control = (volatile uint32_t *)0x900C0028;
+        saved_cx_load = *cx_timer_load;
+        saved_cx_control = *cx_timer_control;
+        *cx_timer_control = 0;
+        *cx_timer_load = 0xFFFFFFFF;
+        *cx_timer_control = 0x82;
+    }
+    timer_ready = 1;
     last_ticks = 0;
     nspire_time_ms();
     return 0;
@@ -51,21 +108,68 @@ int plat_init(int argc, char **argv)
 
 void plat_quit(void)
 {
-    *timer_control = 0;
-    *timer_load = saved_load;
-    *timer_control = saved_control;
+    if (timer_ready) {
+        if (classic_timer) {
+            *classic_timer_control = 0x10;
+            *classic_timer_count = saved_classic_count;
+            *classic_timer_divider = saved_classic_divider;
+            *classic_timer_control = saved_classic_control;
+        } else {
+            *cx_timer_control = 0;
+            *cx_timer_load = saved_cx_load;
+            *cx_timer_control = saved_cx_control;
+        }
+        timer_ready = 0;
+    }
     if (old_speed) set_cpu_speed(old_speed);
     lcd_init(SCR_TYPE_INVALID);
+    free(gray_fb);
+    gray_fb = NULL;
     free(fb);
+    fb = NULL;
 }
 
 uint16_t *plat_fb(void) { return fb; }
-void plat_present(void) { lcd_blit(fb, SCR_320x240_565); }
+
+/* Convert RGB565 to 4-bit luminance for the OG Clickpad LCD. The first
+ * pixel occupies the high nibble, matching Ndless's classic LCD format. */
+static uint8_t rgb565_to_gray4(uint16_t color)
+{
+    unsigned r = (color >> 11) & 31u;
+    unsigned g = (color >> 5) & 63u;
+    unsigned b = color & 31u;
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
+    unsigned luminance = (77u * r + 150u * g + 29u * b + 128u) >> 8;
+    return (uint8_t)((luminance * 15u + 127u) / 255u);
+}
+
+void plat_present(void)
+{
+    if (display_type == SCR_320x240_4) {
+        for (unsigned i = 0; i < SCR_W * SCR_H; i += 2) {
+            uint8_t hi = rgb565_to_gray4(fb[i]);
+            uint8_t lo = rgb565_to_gray4(fb[i + 1]);
+            gray_fb[i >> 1] = (uint8_t)((hi << 4) | lo);
+        }
+        lcd_blit(gray_fb, SCR_320x240_4);
+    } else {
+        lcd_blit(fb, display_type);
+    }
+}
 
 uint32_t plat_ms(void)
 {
-    uint32_t t = 0xFFFFFFFFu - *timer_value;
-    /* 32768 Hz -> ms with 64-bit math to avoid drift */
+    if (classic_timer) {
+        uint16_t now = *classic_timer_count;
+        classic_ticks += (uint16_t)(now - classic_last_count);
+        classic_last_count = now;
+        /* Classic timer ticks at 32,768 Hz; preserve fractional ms. */
+        return (uint32_t)((classic_ticks * 1000ull) >> 15);
+    }
+    uint32_t t = 0xFFFFFFFFu - *cx_timer_value;
+    /* CX SP804 timer: 32768 Hz -> ms with 64-bit math to avoid drift. */
     return (uint32_t)(((uint64_t)t * 1000ull) >> 15);
 }
 /* wall clock in ms for Date.now(): RTC seconds at start + fine timer */
