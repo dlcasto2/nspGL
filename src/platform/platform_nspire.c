@@ -14,13 +14,8 @@ static char arg_file[256];
 static touchpad_report_t tp_last;
 static int tp_had;
 
-/* SP804 timer (second counter of the first timer module), 32768 Hz */
-static volatile uint32_t *const timer_load = (volatile uint32_t *)0x900C0020;
-static volatile uint32_t *const timer_value = (volatile uint32_t *)0x900C0024;
-static volatile uint32_t *const timer_control = (volatile uint32_t *)0x900C0028;
-static uint32_t saved_load, saved_control;
-static uint32_t last_ticks;
-static unsigned old_speed;
+static scr_type_t display_type;
+static uint8_t *gray_fb;
 
 /* malloc_usable_size is referenced by QuickJS default allocator */
 size_t malloc_usable_size(void *p) { (void)p; return 0; }
@@ -35,47 +30,90 @@ int plat_init(int argc, char **argv)
     if (argc > 1 && argv[1]) snprintf(arg_file, sizeof arg_file, "%s", argv[1]);
     cfg_register_fileext("html", "nspgl");
     cfg_register_fileext("htm", "nspgl");
-    fb = calloc(SCR_W * SCR_H, 2);
+    fb = calloc(SCR_W * SCR_H, sizeof(*fb));
     if (!fb) return -1;
-    old_speed = set_cpu_speed(CPU_SPEED_150MHZ);
-    if (!lcd_init(SCR_320x240_565)) return -1;
-    saved_load = *timer_load;
-    saved_control = *timer_control;
-    *timer_control = 0;
-    *timer_load = 0xFFFFFFFF;
-    *timer_control = 0x82;
-    last_ticks = 0;
-    nspire_time_ms();
+
+    /* lcd_type() reports SCR_320x240_4 on the OG monochrome Clickpad
+     * and SCR_320x240_565 on the color CX. Keep the renderer's internal
+     * framebuffer RGB565 and convert only when presenting to a classic LCD. */
+    display_type = lcd_type();
+    if (display_type != SCR_320x240_4 && display_type != SCR_320x240_565)
+        display_type = is_classic ? SCR_320x240_4 : SCR_320x240_565;
+    if (display_type == SCR_320x240_4) {
+        gray_fb = calloc(SCR_W * SCR_H / 2, sizeof(*gray_fb));
+        if (!gray_fb) {
+            free(fb);
+            fb = NULL;
+            return -1;
+        }
+    }
+
+    if (!lcd_init(display_type)) {
+        free(gray_fb);
+        gray_fb = NULL;
+        free(fb);
+        fb = NULL;
+        return -1;
+    }
+
+    /* Diagnostic build: do not touch undocumented timer registers.
+     * Use the Ndless RTC at one-second resolution until startup is stable. */
+    show_msgbox("nspGL diagnostic", "Platform initialization passed. Press OK to continue.");
     return 0;
 }
 
 void plat_quit(void)
 {
-    *timer_control = 0;
-    *timer_load = saved_load;
-    *timer_control = saved_control;
-    if (old_speed) set_cpu_speed(old_speed);
     lcd_init(SCR_TYPE_INVALID);
+    free(gray_fb);
+    gray_fb = NULL;
     free(fb);
+    fb = NULL;
 }
 
 uint16_t *plat_fb(void) { return fb; }
-void plat_present(void) { lcd_blit(fb, SCR_320x240_565); }
+
+/* Convert RGB565 to 4-bit luminance for the OG Clickpad LCD. The first
+ * pixel occupies the high nibble, matching Ndless's classic LCD format. */
+static uint8_t rgb565_to_gray4(uint16_t color)
+{
+    unsigned r = (color >> 11) & 31u;
+    unsigned g = (color >> 5) & 63u;
+    unsigned b = color & 31u;
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
+    unsigned luminance = (77u * r + 150u * g + 29u * b + 128u) >> 8;
+    return (uint8_t)((luminance * 15u + 127u) / 255u);
+}
+
+void plat_present(void)
+{
+    if (display_type == SCR_320x240_4) {
+        for (unsigned i = 0; i < SCR_W * SCR_H; i += 2) {
+            uint8_t hi = rgb565_to_gray4(fb[i]);
+            uint8_t lo = rgb565_to_gray4(fb[i + 1]);
+            gray_fb[i >> 1] = (uint8_t)((hi << 4) | lo);
+        }
+        lcd_blit(gray_fb, SCR_320x240_4);
+    } else {
+        lcd_blit(fb, display_type);
+    }
+}
 
 uint32_t plat_ms(void)
 {
-    uint32_t t = 0xFFFFFFFFu - *timer_value;
-    /* 32768 Hz -> ms with 64-bit math to avoid drift */
-    return (uint32_t)(((uint64_t)t * 1000ull) >> 15);
+    return (*(volatile uint32_t *)0x90090000) * 1000u;
 }
-/* wall clock in ms for Date.now(): RTC seconds at start + fine timer */
-static int64_t t0_ms; static uint32_t t0_ticks;
+/* Wall clock uses the same stable Ndless RTC source during diagnostics. */
 int64_t nspire_time_ms(void)
 {
-    if (!t0_ms) { t0_ms = (int64_t)(*(volatile uint32_t *)0x90090000) * 1000; t0_ticks = plat_ms(); if (!t0_ms) t0_ms = 1; }
-    return t0_ms + (uint32_t)(plat_ms() - t0_ticks);
+    return (int64_t)(*(volatile uint32_t *)0x90090000) * 1000;
 }
-void plat_wait_ms(int ms) { if (ms > 0) msleep(ms); }
+void plat_wait_ms(int ms)
+{
+    if (ms > 0) msleep((unsigned)ms);
+}
 
 void plat_keys(uint8_t *d)
 {
@@ -150,27 +188,10 @@ const char *plat_arg_file(void) { return arg_file[0] ? arg_file : NULL; }
 int plat_is_host(void) { return 0; }
 void plat_log(const char *s) { (void)s; }
 
-/* run on a private 2 MiB stack: QuickJS and the GLSL compiler recurse deeply */
-static void (*run_fn)(void);
-static void trampoline(void) { run_fn(); }
-__attribute__((naked, noinline)) static void call_on_stack(void (*fn)(void), void *top)
-{
-    __asm__ volatile(
-        "push {r4, lr}\n"
-        "mov r4, sp\n"
-        "mov sp, r1\n"
-        "blx r0\n"
-        "mov sp, r4\n"
-        "pop {r4, pc}\n");
-}
+/* Diagnostic build: use the Ndless-provided process stack.
+ * The custom ARM stack trampoline is disabled until startup is verified. */
 void plat_run(void (*fn)(void))
 {
-    const size_t SZ = 2 * 1024 * 1024;
-    char *stk = malloc(SZ);
-    if (!stk) { fn(); return; }
-    run_fn = fn;
-    void *top = (void *)(((uintptr_t)(stk + SZ)) & ~(uintptr_t)7);
-    call_on_stack(trampoline, top);
-    free(stk);
+    fn();
 }
 #endif

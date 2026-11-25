@@ -30,7 +30,7 @@ build/nspgl.elf: $(NOBJ)
 
 nspgl.tns: build/nspgl.elf
 	genzehn --input $< --output build/nspgl.zehn --name "nspGL" --version 10 --author "nspGL" --notice "WebGL + HTML viewer" \
-	        --compress --uses-lcd-blit true --240x320-support true
+	        --compress --uses-lcd-blit true --clickpad-support true --touchpad-support true --color-support true --240x320-support true
 	make-prg build/nspgl.zehn $@
 	@ls -la $@
 
