@@ -32,9 +32,11 @@ and hardware revision.
 ## Installing
 
 1. Install the Ndless release that matches the calculator hardware and OS.
-   For an original Clickpad/Touchpad on OS 3.9.0.463, use the classic OS 3.9.0
-   installer. Do not use the CX installer; CX models use their separate OS
-   3.9.1 release line. For a color CX on OS 4.5.5, use the matching CX installer.
+   For an original Clickpad/Touchpad (including CAS) on OS 3.9.0.463, use
+   `ndless_installer_3.9.0_classic_new.tns` and `ndless_resources.tns` from
+   the classic Ndless package. Do not use the CX installer; CX models use the
+   separate OS 3.9.1 release line. For a color CX on OS 4.5.5, use the matching
+   CX installer.
 2. Send `nspgl.tns` to the calculator (any folder; the `ndless` folder is fine).
 3. Send your pages with a `.tns` suffix (use TiLP or TI-Nspire Computer Link;
    some versions of the Student Software refuse non-document `.tns` files), e.g. `cube.html.tns`. Scripts, images and
