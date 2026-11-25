@@ -24,7 +24,6 @@ static volatile uint16_t *classic_timer_divider;
 static volatile uint16_t *classic_timer_control;
 static uint32_t saved_cx_load, saved_cx_control;
 static uint16_t saved_classic_count, saved_classic_divider, saved_classic_control;
-static uint32_t last_ticks;
 static uint16_t classic_last_count;
 static uint64_t classic_ticks;
 static int classic_timer, timer_ready;
@@ -101,7 +100,6 @@ int plat_init(int argc, char **argv)
         *cx_timer_control = 0x82;
     }
     timer_ready = 1;
-    last_ticks = 0;
     nspire_time_ms();
     return 0;
 }
