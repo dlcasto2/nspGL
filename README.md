@@ -4,9 +4,18 @@ nspGL opens `.html` files on the calculator, runs their JavaScript, and renders
 WebGL 1.0 (and basic 2D canvas) in software. It is a single Ndless program
 (`nspgl.tns`).
 
-Tested target: **TI-Nspire CX (non-II), OS 4.5.5.79, Ndless for 4.5.5**.
-It should also run on other CX OS versions that Ndless supports, and on the CX II
-(the LCD is handled through `lcd_blit`).
+Compatibility targets:
+
+- **Original TI-Nspire Clickpad/Touchpad (including CAS):** OS 3.9.0.463 with
+  the matching classic Ndless installer. The monochrome LCD is 4-bit grayscale;
+  nspGL converts its RGB565 render buffer to the calculator's native format.
+- **Color TI-Nspire CX (non-II):** OS 4.5.5.79 with the matching CX Ndless build.
+  The existing RGB565 display path is retained.
+
+The classic Clickpad uses its legacy timer hardware rather than the CX SP804
+timer. nspGL selects the correct display and timer paths at runtime. These are
+compatibility targets; actual-device validation is still required for each OS
+and hardware revision.
 
 ## What's inside
 
@@ -22,7 +31,10 @@ It should also run on other CX OS versions that Ndless supports, and on the CX I
 
 ## Installing
 
-1. Install Ndless on the calculator (for OS 4.5.5 use the matching Ndless installer).
+1. Install the Ndless release that matches the calculator hardware and OS.
+   For an original Clickpad/Touchpad on OS 3.9.0.463, use the classic OS 3.9.0
+   installer. Do not use the CX installer; CX models use their separate OS
+   3.9.1 release line. For a color CX on OS 4.5.5, use the matching CX installer.
 2. Send `nspgl.tns` to the calculator (any folder; the `ndless` folder is fine).
 3. Send your pages with a `.tns` suffix (use TiLP or TI-Nspire Computer Link;
    some versions of the Student Software refuse non-document `.tns` files), e.g. `cube.html.tns`. Scripts, images and
@@ -38,9 +50,10 @@ nspGL tries the name with `.tns` appended first, then the name as written.
 
 | Key | Action |
 |---|---|
-| arrows / touchpad edges | scroll (or sent to the page as `ArrowUp`... when it listens for keys; then use `ctrl`+up/down to scroll) |
+| arrows | scroll (or sent to the page as `ArrowUp`... when it listens for keys; then use `ctrl`+up/down to scroll) |
 | `tab` | jump between links/buttons; `enter` follows |
-| touchpad | moves a mouse cursor; click = `mousedown/up/click` + pointer events |
+| touchpad models only | moves a mouse cursor; click = `mousedown/up/click` + pointer events |
+| Clickpad | use the arrow keys to navigate; `enter` activates the focused link/button (the Clickpad has no pointer surface) |
 | letters, digits, `space`, `enter`, `del`(Backspace), `shift`, `ctrl` | delivered to JS as `KeyboardEvent`s with standard `key`/`code`/`keyCode` |
 | `esc` | back / close page |
 | `menu` | Back, Reload, 3D quality, fullscreen canvas, FPS counter, console, open file, quit |
@@ -51,8 +64,11 @@ A red **!** in the corner means the page logged an error — open the console.
 
 ## Performance notes
 
-The CX has a 132–150 MHz ARM9 with no FPU and no GPU; every pixel runs your
-fragment shader in an interpreter. nspGL renders WebGL canvases at a reduced
+The original Clickpad/CX family uses an ARM9 with no FPU and no GPU; every
+pixel runs your fragment shader in an interpreter. On the monochrome Clickpad,
+the display conversion is applied only at presentation time, so the renderer
+and its RGB565 framebuffer remain shared with color CX builds. nspGL renders
+WebGL canvases at a reduced
 internal resolution (menu → *3D quality*, default 50 %, i.e. 160×120 for a
 full-screen canvas) and scales up. It runs the CPU at 150 MHz while open.
 `gl_FragCoord`, `drawingBufferWidth` and `viewport` keep using the canvas's
