@@ -14,23 +14,8 @@ static char arg_file[256];
 static touchpad_report_t tp_last;
 static int tp_had;
 
-/* The color CX uses an ARM SP804 timer. Classic Clickpad/Touchpad
- * hardware uses the older 16-bit timer block at 0x900C0000 instead. */
-static volatile uint32_t *cx_timer_load;
-static volatile uint32_t *cx_timer_value;
-static volatile uint32_t *cx_timer_control;
-static volatile uint16_t *classic_timer_count;
-static volatile uint16_t *classic_timer_divider;
-static volatile uint16_t *classic_timer_control;
-static uint32_t saved_cx_load, saved_cx_control;
-static uint16_t saved_classic_count, saved_classic_divider, saved_classic_control;
-static uint16_t classic_last_count;
-static uint64_t classic_ticks;
-static int classic_timer, timer_ready;
-
 static scr_type_t display_type;
 static uint8_t *gray_fb;
-static unsigned old_speed;
 
 /* malloc_usable_size is referenced by QuickJS default allocator */
 size_t malloc_usable_size(void *p) { (void)p; return 0; }
@@ -63,9 +48,7 @@ int plat_init(int argc, char **argv)
         }
     }
 
-    old_speed = set_cpu_speed(CPU_SPEED_150MHZ);
     if (!lcd_init(display_type)) {
-        if (old_speed) set_cpu_speed(old_speed);
         free(gray_fb);
         gray_fb = NULL;
         free(fb);
@@ -73,55 +56,14 @@ int plat_init(int argc, char **argv)
         return -1;
     }
 
-    if (is_classic) {
-        /* The classic timer registers are 16-bit. Use the second channel of
-         * the first timer block so msleep() can keep using the 900D timer. */
-        classic_timer = 1;
-        classic_timer_count = (volatile uint16_t *)0x900C000C;
-        classic_timer_divider = (volatile uint16_t *)0x900C0010;
-        classic_timer_control = (volatile uint16_t *)0x900C0014;
-        saved_classic_count = *classic_timer_count;
-        saved_classic_divider = *classic_timer_divider;
-        saved_classic_control = *classic_timer_control;
-        *classic_timer_control = 0x10; /* freeze while configuring */
-        /* 32,768 / (31 + 1) = 1,024 Hz. This extends the 16-bit
-         * wrap interval from 2 s to 64 s while retaining ~0.98 ms ticks. */
-        *classic_timer_divider = 31;
-        *classic_timer_count = 0;
-        *classic_timer_control = 0x0F; /* count up, free-running */
-        classic_last_count = *classic_timer_count;
-        classic_ticks = 0;
-    } else {
-        cx_timer_load = (volatile uint32_t *)0x900C0020;
-        cx_timer_value = (volatile uint32_t *)0x900C0024;
-        cx_timer_control = (volatile uint32_t *)0x900C0028;
-        saved_cx_load = *cx_timer_load;
-        saved_cx_control = *cx_timer_control;
-        *cx_timer_control = 0;
-        *cx_timer_load = 0xFFFFFFFF;
-        *cx_timer_control = 0x82;
-    }
-    timer_ready = 1;
-    nspire_time_ms();
+    /* Diagnostic build: do not touch undocumented timer registers.
+     * Use the Ndless RTC at one-second resolution until startup is stable. */
+    show_msgbox("nspGL diagnostic", "Platform initialization passed. Press OK to continue.");
     return 0;
 }
 
 void plat_quit(void)
 {
-    if (timer_ready) {
-        if (classic_timer) {
-            *classic_timer_control = 0x10;
-            *classic_timer_count = saved_classic_count;
-            *classic_timer_divider = saved_classic_divider;
-            *classic_timer_control = saved_classic_control;
-        } else {
-            *cx_timer_control = 0;
-            *cx_timer_load = saved_cx_load;
-            *cx_timer_control = saved_cx_control;
-        }
-        timer_ready = 0;
-    }
-    if (old_speed) set_cpu_speed(old_speed);
     lcd_init(SCR_TYPE_INVALID);
     free(gray_fb);
     gray_fb = NULL;
@@ -161,34 +103,16 @@ void plat_present(void)
 
 uint32_t plat_ms(void)
 {
-    if (classic_timer) {
-        uint16_t now = *classic_timer_count;
-        classic_ticks += (uint16_t)(now - classic_last_count);
-        classic_last_count = now;
-        /* Prescaled classic timer ticks at 1,024 Hz. */
-        return (uint32_t)((classic_ticks * 1000ull) >> 10);
-    }
-    uint32_t t = 0xFFFFFFFFu - *cx_timer_value;
-    /* CX SP804 timer: 32768 Hz -> ms with 64-bit math to avoid drift. */
-    return (uint32_t)(((uint64_t)t * 1000ull) >> 15);
+    return (*(volatile uint32_t *)0x90090000) * 1000u;
 }
-/* wall clock in ms for Date.now(): RTC seconds at start + fine timer */
-static int64_t t0_ms; static uint32_t t0_ticks;
+/* Wall clock uses the same stable Ndless RTC source during diagnostics. */
 int64_t nspire_time_ms(void)
 {
-    if (!t0_ms) { t0_ms = (int64_t)(*(volatile uint32_t *)0x90090000) * 1000; t0_ticks = plat_ms(); if (!t0_ms) t0_ms = 1; }
-    return t0_ms + (uint32_t)(plat_ms() - t0_ticks);
+    return (int64_t)(*(volatile uint32_t *)0x90090000) * 1000;
 }
 void plat_wait_ms(int ms)
 {
-    if (ms > 0) {
-        /* The classic timer wraps every ~2 seconds. The app sleeps in short
-         * UI intervals; sample on both sides so modal menus also account for
-         * every wrap instead of losing elapsed time while waiting. */
-        if (classic_timer) (void)plat_ms();
-        msleep(ms);
-        if (classic_timer) (void)plat_ms();
-    }
+    if (ms > 0) msleep((unsigned)ms);
 }
 
 void plat_keys(uint8_t *d)
@@ -264,27 +188,10 @@ const char *plat_arg_file(void) { return arg_file[0] ? arg_file : NULL; }
 int plat_is_host(void) { return 0; }
 void plat_log(const char *s) { (void)s; }
 
-/* run on a private 2 MiB stack: QuickJS and the GLSL compiler recurse deeply */
-static void (*run_fn)(void);
-static void trampoline(void) { run_fn(); }
-__attribute__((naked, noinline)) static void call_on_stack(void (*fn)(void), void *top)
-{
-    __asm__ volatile(
-        "push {r4, lr}\n"
-        "mov r4, sp\n"
-        "mov sp, r1\n"
-        "blx r0\n"
-        "mov sp, r4\n"
-        "pop {r4, pc}\n");
-}
+/* Diagnostic build: use the Ndless-provided process stack.
+ * The custom ARM stack trampoline is disabled until startup is verified. */
 void plat_run(void (*fn)(void))
 {
-    const size_t SZ = 2 * 1024 * 1024;
-    char *stk = malloc(SZ);
-    if (!stk) { fn(); return; }
-    run_fn = fn;
-    void *top = (void *)(((uintptr_t)(stk + SZ)) & ~(uintptr_t)7);
-    call_on_stack(trampoline, top);
-    free(stk);
+    fn();
 }
 #endif
