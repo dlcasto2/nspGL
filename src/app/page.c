@@ -385,7 +385,7 @@ Page *page_open(const char *path)
 
     pg->rt = JS_NewRuntime();
     JS_SetMemoryLimit(pg->rt, 32 * 1024 * 1024);
-    JS_SetMaxStackSize(pg->rt, plat_is_host() ? 4 * 1024 * 1024 : 1536 * 1024);
+    JS_SetMaxStackSize(pg->rt, plat_is_host() ? 4 * 1024 * 1024 : 48 * 1024);
     JS_SetInterruptHandler(pg->rt, interrupt_handler, pg);
     JS_SetModuleLoaderFunc(pg->rt, module_normalize, module_loader, pg);
     pg->ctx = JS_NewContext(pg->rt);
